@@ -9,8 +9,9 @@ import (
 	"regexp"
 )
 
-// Only the manifest is decoded. Each game defines the contents of its data files.
-type manifest struct {
+const maxZIPIndexSize = 2 << 20
+
+type legacyManifest struct {
 	Version int               `json:"schema_version"`
 	ID      string            `json:"session_id"`
 	Status  string            `json:"status"`
@@ -21,7 +22,7 @@ type manifest struct {
 	} `json:"photo"`
 }
 
-var sessionFilename = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
+var legacySessionFilename = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
 
 // Bound the ZIP index scan before archive/zip has allocated every entry.
 type archiveReader struct {
@@ -40,7 +41,7 @@ func (r *archiveReader) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func validateOpaqueZIP(data []byte) error {
-	source := &archiveReader{Reader: bytes.NewReader(data), indexBudget: 2 << 20}
+	source := &archiveReader{Reader: bytes.NewReader(data), indexBudget: maxZIPIndexSize}
 	z, err := zip.NewReader(source, int64(len(data)))
 	if err != nil {
 		return errors.New("expected a valid ZIP archive")
@@ -56,8 +57,8 @@ func validateOpaqueZIP(data []byte) error {
 	return nil
 }
 
-func validateArchive(data []byte, sessionID string) error {
-	source := &archiveReader{Reader: bytes.NewReader(data), indexBudget: 2 << 20}
+func validateLegacyArchive(data []byte, sessionID string) error {
+	source := &archiveReader{Reader: bytes.NewReader(data), indexBudget: maxZIPIndexSize}
 	z, err := zip.NewReader(source, int64(len(data)))
 	if err != nil || len(z.File) < 2 || len(z.File) > 32 {
 		return errors.New("expected a session ZIP with 2 to 32 files")
@@ -66,7 +67,7 @@ func validateArchive(data []byte, sessionID string) error {
 	files := make(map[string]*zip.File, len(z.File))
 	remaining := uint64(maxArchiveSize)
 	for _, file := range z.File {
-		if !sessionFilename.MatchString(file.Name) || files[file.Name] != nil || !file.Mode().IsRegular() || file.UncompressedSize64 > remaining {
+		if !legacySessionFilename.MatchString(file.Name) || files[file.Name] != nil || !file.Mode().IsRegular() || file.UncompressedSize64 > remaining {
 			return errors.New("invalid session ZIP entry or uncompressed size")
 		}
 		remaining -= file.UncompressedSize64
@@ -81,7 +82,7 @@ func validateArchive(data []byte, sessionID string) error {
 	if err := readEntry(entry, &contents); err != nil {
 		return err
 	}
-	var m manifest
+	var m legacyManifest
 	if err := json.Unmarshal(contents.Bytes(), &m); err != nil || m.Version < 1 || m.ID != sessionID {
 		return errors.New("manifest does not match the session")
 	}

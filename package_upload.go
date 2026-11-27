@@ -16,8 +16,7 @@ func (u uploader) uploadPackage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	packageID := r.Header.Get("X-Package-Id")
-	dest, ok := u.destinations[packageID]
-	if !ok || !androidPackageID.MatchString(packageID) {
+	if _, ok := u.packageIDs[packageID]; !ok {
 		reply(w, http.StatusBadRequest, "error", "unknown Android package ID")
 		return
 	}
@@ -47,7 +46,7 @@ func (u uploader) uploadPackage(w http.ResponseWriter, r *http.Request) {
 
 	started = started.UTC()
 	timestamp := strings.Replace(started.Format("20060102T150405.000Z"), ".", "", 1)
-	name := path.Join(dest.Prefix, packageID, timestamp+"-"+sessionID+"-"+archiveDigest(data)+".zip")
+	name := path.Join(sessionsPrefix, packageID, timestamp+"-"+sessionID+"-"+archiveDigest(data)+".zip")
 	metadata := map[string]string{
 		"package_id":     packageID,
 		"session_id":     sessionID,
@@ -56,5 +55,5 @@ func (u uploader) uploadPackage(w http.ResponseWriter, r *http.Request) {
 	if version != "" {
 		metadata["app_version"] = version
 	}
-	u.storeArchive(w, r, dest, name, data, metadata)
+	u.storeArchive(w, r, name, data, metadata)
 }
