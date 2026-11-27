@@ -1,4 +1,4 @@
-module github.com/nex-team-inc/game-session-data-upload
+module github.com/nex-team-inc/game-session-upload
 
 go 1.26.0
 

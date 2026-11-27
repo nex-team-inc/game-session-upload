@@ -42,11 +42,11 @@ type destination struct {
 func main() {
 	var destinations map[string]destination
 	if err := json.Unmarshal([]byte(os.Getenv("SESSION_DATA_DESTINATIONS")), &destinations); err != nil || len(destinations) == 0 {
-		log.Fatal("SESSION_DATA_DESTINATIONS must map game IDs to storage destinations")
+		log.Fatal("SESSION_DATA_DESTINATIONS must map game and Android package IDs to storage destinations")
 	}
 	for game, d := range destinations {
 		if game == "" || d.Bucket == "" || !fs.ValidPath(d.Prefix) || d.Prefix == "." {
-			log.Fatalf("invalid session data destination for game %q", game)
+			log.Fatalf("invalid session data destination for %q", game)
 		}
 	}
 	store, err := storage.NewService(context.Background())
@@ -58,7 +58,9 @@ func main() {
 		port = "8080"
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /sessions", uploader{destinations, store}.upload)
+	upload := uploader{destinations, store}
+	mux.HandleFunc("POST /sessions", upload.upload)
+	mux.HandleFunc("POST /v2/sessions", upload.uploadPackage)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusOK, "status", "ok")
 	})
@@ -70,9 +72,7 @@ func main() {
 }
 
 func (u uploader) upload(w http.ResponseWriter, r *http.Request) {
-	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/zip" {
-		reply(w, http.StatusUnsupportedMediaType, "error", "expected application/zip")
+	if !acceptZip(w, r) {
 		return
 	}
 	game := r.Header.Get("X-Game-Id")
@@ -87,6 +87,29 @@ func (u uploader) upload(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusBadRequest, "error", "invalid session directory")
 		return
 	}
+	data, ok := readUpload(w, r)
+	if !ok {
+		return
+	}
+	if err := validateArchive(data, match[1]); err != nil {
+		reply(w, http.StatusBadRequest, "error", err.Error())
+		return
+	}
+
+	name := path.Join(dest.Prefix, session, archiveDigest(data)+".zip")
+	u.storeArchive(w, r, dest, name, data, nil)
+}
+
+func acceptZip(w http.ResponseWriter, r *http.Request) bool {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/zip" {
+		reply(w, http.StatusUnsupportedMediaType, "error", "expected application/zip")
+		return false
+	}
+	return true
+}
+
+func readUpload(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxArchiveSize))
 	if err != nil {
 		var tooLarge *http.MaxBytesError
@@ -95,28 +118,30 @@ func (u uploader) upload(w http.ResponseWriter, r *http.Request) {
 		} else {
 			reply(w, http.StatusBadRequest, "error", "could not read session archive")
 		}
-		return
+		return nil, false
 	}
-	if err := validateArchive(data, match[1]); err != nil {
-		reply(w, http.StatusBadRequest, "error", err.Error())
-		return
-	}
+	return data, true
+}
 
-	name := path.Join(dest.Prefix, session, fmt.Sprintf("%x.zip", sha256.Sum256(data)))
+func archiveDigest(data []byte) string {
+	return fmt.Sprintf("%x", sha256.Sum256(data))
+}
+
+func (u uploader) storeArchive(w http.ResponseWriter, r *http.Request, dest destination, name string, data []byte, metadata map[string]string) {
 	checksum := binary.BigEndian.AppendUint32(nil, crc32.Checksum(data, crcTable))
 	object := &storage.Object{
 		Name: name, ContentType: "application/zip", CacheControl: "no-store",
-		Crc32c: base64.StdEncoding.EncodeToString(checksum),
+		Crc32c: base64.StdEncoding.EncodeToString(checksum), Metadata: metadata,
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
-	_, err = u.store.Objects.Insert(dest.Bucket, object).
+	_, err := u.store.Objects.Insert(dest.Bucket, object).
 		Media(bytes.NewReader(data), googleapi.ChunkSize(0)).
 		IfGenerationMatch(0).Fields("name").Context(ctx).Do()
 	// A retry of the same bytes targets the same immutable object.
 	var apiErr *googleapi.Error
 	if err != nil && !(errors.As(err, &apiErr) && apiErr.Code == http.StatusPreconditionFailed) {
-		log.Printf("storing %s session %s: %v", game, session, err)
+		log.Printf("storing session archive %s: %v", name, err)
 		reply(w, http.StatusBadGateway, "error", "could not store session data")
 		return
 	}

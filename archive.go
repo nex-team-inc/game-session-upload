@@ -39,6 +39,23 @@ func (r *archiveReader) ReadAt(p []byte, off int64) (int, error) {
 	return r.Reader.ReadAt(p, off)
 }
 
+func validateOpaqueZIP(data []byte) error {
+	source := &archiveReader{Reader: bytes.NewReader(data), indexBudget: 2 << 20}
+	z, err := zip.NewReader(source, int64(len(data)))
+	if err != nil {
+		return errors.New("expected a valid ZIP archive")
+	}
+
+	remaining := uint64(maxArchiveSize)
+	for _, file := range z.File {
+		if file.UncompressedSize64 > remaining {
+			return errors.New("uncompressed ZIP exceeds 16 MiB")
+		}
+		remaining -= file.UncompressedSize64
+	}
+	return nil
+}
+
 func validateArchive(data []byte, sessionID string) error {
 	source := &archiveReader{Reader: bytes.NewReader(data), indexBudget: 2 << 20}
 	z, err := zip.NewReader(source, int64(len(data)))

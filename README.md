@@ -1,21 +1,31 @@
-# Game session data upload
+# Game Session Upload
 
-This Cloud Run service receives completed game recordings. Each game captures and defines its own payload. The server validates the shared archive envelope and writes it to the destination registered for that game.
+One Cloud Run service receives session recordings for registered Android package IDs. Games choose the files in their ZIP and the service stores the received archive bytes unchanged.
 
-Send a finished ZIP to `POST /sessions` as `application/zip` with two headers. The current shared endpoint is `https://game-session-data-upload-626314545571.us-central1.run.app/sessions`.
+## Upload
+
+Send `POST /v2/sessions` with content type `application/zip`.
 
 | Header | Value |
 | --- | --- |
-| `X-Game-Id` | A configured game ID, such as `basketball`. |
-| `X-Session-Directory` | The session directory name, formatted as a UTC timestamp (`yyyyMMddTHHmmssfffZ`), a hyphen, and a 32-character lowercase hexadecimal session ID. |
+| `X-Package-Id` | Registered Android application ID, for example `team.nex.nba`. |
+| `X-Session-Id` | A UUID written as 32 lowercase hexadecimal characters. |
+| `X-Session-Started-At` | Recording start in RFC 3339, normalized to UTC for the object key. |
+| `X-App-Version` | Optional game version. |
 
-The server selects the bucket and prefix from its own configuration. It writes `<prefix>/<session directory>/<SHA-256>.zip` with a create-only precondition and returns the object's `gs://` URI in a JSON `uri` field. Posting identical bytes again returns the same URI. `GET /health` reports availability.
+The ZIP can be empty and has zero required files. The service checks ZIP structure and archive sizes without decoding game files. Both the request and total declared uncompressed contents are limited to 16 MiB. The Unity client uses a local `common.json` sidecar for its queue and supplies the request headers from it.
 
-## Session data format
+Register destinations using the `SESSION_DATA_DESTINATIONS` JSON map. For a route with prefix `sessions`, the service writes `sessions/<package-id>/<UTC-start>-<session-id>-<SHA-256>.zip`. Fixed-width UTC timestamps make object names sort by recording time within a package. The package ID and session metadata are also stored on the object. The storage object's creation time records the upload time.
+
+Successful uploads return a JSON object with a `uri` field. Retrying the same archive and session metadata returns the same object URI. `GET /health` reports service availability.
+
+## Legacy Basketball uploads
+
+Already-installed Basketball clients can post to `/sessions` with `X-Game-Id: basketball` and their existing `X-Session-Directory`. Their object naming and manifest contract are preserved.
 
 Include `session.json` and each file it declares. The manifest contains a positive integer `schema_version`, the `session_id` from the directory name, a final `status`, and a `files` object mapping game-specific keys to unique archive filenames. An optional `photo` object with `status` set to `captured` names one additional entry in `file`. Final statuses are `completed`, `cancelled`, `restarted`, `application_quit`, `disabled`, `destroyed`, and `recording_error`.
 
-The ZIP contains 2–32 regular files at the root. Filenames start with an ASCII letter or digit and may contain letters, digits, periods, underscores, and hyphens, up to 128 characters. Both the request and the total uncompressed ZIP entries are limited to 16 MiB. The manifest is limited to 256 KiB. Every game uses these checks and chooses its own data files.
+The ZIP contains 2–32 regular files at the root. Filenames start with an ASCII letter or digit and may contain letters, digits, periods, underscores, and hyphens, up to 128 characters. Both the request and the total uncompressed ZIP entries are limited to 16 MiB. The manifest is limited to 256 KiB. The legacy Basketball client uses this contract.
 
 For example, a game that records its own manifest and a compressed event stream can use this envelope.
 
@@ -35,32 +45,26 @@ The ZIP then contains `session.json`, `manifest.json`, and `events.jsonl.gz` at 
 
 ## Deploy
 
-To update the existing service, run this from the repository root. Cloud Run keeps the configured game destinations.
+The existing Cloud Run service is named `game-session-data-upload`. Deploy from this repository root.
 
 ```sh
 gcloud run deploy game-session-data-upload --source . \
   --project development-179808 --region us-central1
 ```
 
-For a first deployment, the example below registers basketball. The runtime service account has `roles/storage.objectCreator` under `sessions/` in the private `development-179808-game-session-data-upload` bucket.
+Add each Android package ID as a key in the current `SESSION_DATA_DESTINATIONS` map. For Basketball, keep the legacy key alongside the new Android package ID.
 
-```sh
-gcloud run deploy game-session-data-upload \
-  --source server/game-session-data-upload \
-  --project development-179808 --region us-central1 \
-  --service-account game-session-data-upload@development-179808.iam.gserviceaccount.com \
-  --min-instances 0 --max-instances 2 --cpu 1 --memory 256Mi --concurrency 2 --timeout 90 \
-  --update-env-vars='^|^SESSION_DATA_DESTINATIONS={"basketball":{"bucket":"development-179808-game-session-data-upload","prefix":"sessions"}}'
+```json
+{
+  "basketball": {
+    "bucket": "development-179808-game-session-data-upload",
+    "prefix": "sessions"
+  },
+  "team.nex.nba": {
+    "bucket": "development-179808-game-session-data-upload",
+    "prefix": "sessions"
+  }
+}
 ```
 
-A Cloud Run administrator can grant anonymous invocation for all games using this service.
-
-```sh
-gcloud run services add-iam-policy-binding game-session-data-upload \
-  --project development-179808 --region us-central1 \
-  --member=allUsers --role=roles/run.invoker
-```
-
-## Add a game
-
-Add the game's ID, private bucket name, and object prefix to the existing `SESSION_DATA_DESTINATIONS` JSON map. Preserve all existing entries when updating this environment variable or redeploying. Choose a separate prefix when sharing a bucket across games. Give the runtime service account `roles/storage.objectCreator` on the destination prefix if it lacks that access. The new game posts its manifest and files to the same URL with its own `X-Game-Id` header. The public invoker grant applies to the service across revisions.
+Preserve other entries when updating the map. The Cloud Run runtime service account needs object-creation access to each destination. Separate application IDs get separate folders even when they use the same bucket and prefix.
